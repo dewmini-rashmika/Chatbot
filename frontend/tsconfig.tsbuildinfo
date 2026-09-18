@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/components/chat/chatwindow.tsx","./src/components/chat/hitlmodal.tsx","./src/components/layout/sidebar.tsx","./src/hooks/usechat.ts","./src/pages/dashboardpage.tsx","./src/pages/loginpage.tsx","./src/pages/registerpage.tsx","./src/services/api.ts","./src/store/authstore.ts","./src/store/chatstore.ts"],"version":"5.6.3"}
