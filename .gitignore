@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── Custom Additions ──
+# Node
+node_modules/
+dist/
+build/
+.npm/
+
+# Local databases and Chroma
+backend/chroma_db/
+*.sqlite
+*.sqlite3
+*.db
+

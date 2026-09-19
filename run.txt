@@ -1,0 +1,25 @@
+# 1. Add your API key
+# Edit backend/.env → set GOOGLE_API_KEY=your-key
+
+# 2. Create PostgreSQL database
+psql -U postgres -c "CREATE DATABASE music_agent;"
+
+# 3. Activate Python environment
+cd backend
+.venv\Scripts\activate
+
+# 4. Ingest the 68 PDFs into ChromaDB
+python -m data.scripts.ingest_pdfs
+
+# 5. Seed the structured music database
+python -m data.scripts.seed_database
+
+# 6. Generate synthetic reviews (optional but recommended)
+python -m data.scripts.generate_reviews
+
+# 7. Start the backend API
+python -m app.main
+
+# 8. In a new terminal, start the frontend
+cd frontend
+npm run dev
