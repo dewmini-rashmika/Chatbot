@@ -3,8 +3,8 @@ Chat SSE (Server-Sent Events) streaming endpoint.
 This is the core endpoint that powers the real-time chat interface.
 
 Why SSE over WebSockets?
-- SSE is simpler and perfect for one-directional streaming (server → client).
-- Native browser support — no extra library needed in React.
+- SSE is simpler and perfect for one-directional streaming (server -> client).
+- Native browser support -- no extra library needed in React.
 - Works through proxies and load balancers more reliably than WebSockets.
 - WebSockets would be used for true bidirectional comms (e.g., voice).
 """
@@ -12,7 +12,7 @@ import json
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ from sqlalchemy.future import select
 import time
 from app.agents.graph import get_graph
 from app.core.dependencies import get_current_user
-from app.db.database import get_db
+from app.db.database import AsyncSessionLocal, get_db
 from app.guardrails.guardrails import check_input_guardrails, check_output_guardrails
 from app.models.models import Conversation, Message, User
 from app.schemas.schemas import ChatRequest, HITLDecisionRequest
@@ -30,6 +30,25 @@ from app.core.logging_config import log_evaluation
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 memory_service = LongTermMemoryService()
+
+
+async def _save_assistant_message(conversation_id: uuid.UUID, content: str, sources: list):
+    """
+    Background task: persist the assistant reply to the DB after streaming ends.
+    Opens its own session so it runs safely outside the original request scope.
+    """
+    async with AsyncSessionLocal() as db:
+        try:
+            msg = Message(
+                conversation_id=conversation_id,
+                role="assistant",
+                content=content,
+                extra_data={"sources": sources} if sources else None,
+            )
+            db.add(msg)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
 
 async def _stream_agent_response(
@@ -48,7 +67,7 @@ async def _stream_agent_response(
         payload = json.dumps({"event": event, "data": data})
         return f"data: {payload}\n\n"
 
-    # ── Input guardrail check ──────────────────────────────────────────────────
+    # -- Input guardrail check -----------------------------------------------
     guard = check_input_guardrails(user_message)
     if not guard.passed:
         yield await send_event("guardrail_blocked", guard.reason)
@@ -111,14 +130,14 @@ async def _stream_agent_response(
                 })
                 latency = (time.time() - start_time) * 1000
                 log_evaluation(thread_id, user_message, "[HITL PAUSED]", [], latency)
-                return  # Pause — frontend must call /hitl-decision
+                return  # Pause -- frontend must call /hitl-decision
 
     # Get the final state
     final_state = await graph.aget_state(config)
     final_answer = final_state.values.get("final_answer", "")
     sources = final_state.values.get("sources", [])
 
-    # ── Output guardrail check ─────────────────────────────────────────────────
+    # -- Output guardrail check -----------------------------------------------
     out_guard = check_output_guardrails(final_answer)
     if not out_guard.passed:
         yield await send_event("guardrail_blocked", out_guard.reason)
@@ -138,12 +157,18 @@ async def _stream_agent_response(
 @router.post("/stream")
 async def stream_chat(
     payload: ChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Main streaming chat endpoint.
     Returns a Server-Sent Events stream of agent execution events.
+
+    Message persistence strategy:
+    - User message is saved + committed BEFORE streaming starts (safe, synchronous).
+    - Assistant message is saved AFTER streaming ends via a BackgroundTask that
+      opens its own DB session, avoiding session-scope conflicts with SSE.
     """
     # Verify conversation belongs to user
     result = await db.execute(
@@ -156,25 +181,68 @@ async def stream_chat(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    # Persist user message
+    # Persist user message and commit immediately (before streaming begins)
     user_msg = Message(
         conversation_id=conv.id,
         role="user",
         content=payload.message,
     )
     db.add(user_msg)
-    await db.flush()
+    await db.commit()
 
     # Load long-term memories for personalization
     user_memories = await memory_service.recall(current_user.id, db)
 
-    return StreamingResponse(
-        _stream_agent_response(
+    # Schedule background task to save assistant reply once streaming ends.
+    # We pass a coroutine factory; FastAPI's BackgroundTasks will call it after response.
+    # We capture conv.id and thread_id now (before session closes).
+    conv_id = conv.id
+    thread_id = conv.thread_id
+
+    async def _save_reply_after_stream():
+        """
+        Runs the full stream and then persists the assistant message.
+        This is NOT called as a BackgroundTask directly -- instead we wrap
+        the generator so the save happens naturally at stream end.
+        """
+        pass  # handled inline in the wrapped generator below
+
+    async def _stream_and_save():
+        """Wraps the SSE generator and persists the assistant reply when done."""
+        final_answer_parts: list[str] = []
+        sources_captured: list = []
+
+        async for chunk in _stream_agent_response(
             user_message=payload.message,
-            thread_id=conv.thread_id,
+            thread_id=thread_id,
             user_id=str(current_user.id),
             user_memories=user_memories,
-        ),
+        ):
+            # Intercept final_answer event to capture content + sources for DB
+            try:
+                line = chunk
+                if line.startswith("data: "):
+                    parsed = json.loads(line[6:])
+                    if parsed.get("event") == "final_answer":
+                        d = parsed.get("data", {})
+                        final_answer_parts.append(d.get("content", ""))
+                        sources_captured = d.get("sources", [])
+                    elif parsed.get("event") == "guardrail_blocked":
+                        final_answer_parts.append("⚠️ " + str(parsed.get("data", "")))
+            except Exception:
+                pass
+            yield chunk
+
+        # After stream ends, persist assistant message directly
+        if final_answer_parts:
+            await _save_assistant_message(
+                conv_id,
+                "".join(final_answer_parts),
+                sources_captured,
+            )
+
+    return StreamingResponse(
+        _stream_and_save(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -187,6 +255,7 @@ async def stream_chat(
 async def hitl_decision(
     payload: HITLDecisionRequest,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Resume a paused HITL conversation after human approval/rejection.
@@ -215,6 +284,19 @@ async def hitl_decision(
     out_guard = check_output_guardrails(final_answer)
     
     if not out_guard.passed:
-        return {"content": "⚠️ " + out_guard.reason, "sources": []}
+        final_answer = "⚠️ " + out_guard.reason
+        sources = []
+        
+    # Get conversation to save the message
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.thread_id == payload.thread_id,
+            Conversation.user_id == current_user.id,
+        )
+    )
+    conv = result.scalar_one_or_none()
+    
+    if conv:
+        await _save_assistant_message(conv.id, final_answer, sources)
     
     return {"content": final_answer, "sources": sources}

@@ -80,14 +80,42 @@ class ChatRequest(BaseModel):
     conversation_id: uuid.UUID
 
 
+class SourceItem(BaseModel):
+    source: str
+    id: str = ""
+
+
 class MessageResponse(BaseModel):
     id: uuid.UUID
     role: str
     content: str
-    metadata: dict | None = None
+    sources: list[SourceItem] = []
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_orm_message(cls, msg) -> "MessageResponse":
+        """Build from ORM Message, pulling sources out of extra_data."""
+        sources: list[SourceItem] = []
+        if msg.extra_data and isinstance(msg.extra_data.get("sources"), list):
+            for s in msg.extra_data["sources"]:
+                if isinstance(s, dict):
+                    sources.append(SourceItem(source=s.get("source", ""), id=s.get("id", "")))
+                elif isinstance(s, str):
+                    sources.append(SourceItem(source=s))
+        return cls(
+            id=msg.id,
+            role=msg.role,
+            content=msg.content,
+            sources=sources,
+            created_at=msg.created_at,
+        )
+
+
+class ConversationMessagesResponse(BaseModel):
+    conversation_id: uuid.UUID
+    messages: list[MessageResponse]
 
 
 # ── Streaming Schemas ──────────────────────────────────────────────────────────

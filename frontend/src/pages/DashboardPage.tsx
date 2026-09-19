@@ -1,13 +1,14 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { conversationsAPI } from '../services/api'
 import { useChatStore } from '../store/chatStore'
 import { useAuthStore } from '../store/authStore'
 import Sidebar from '../components/layout/Sidebar'
 import ChatWindow from '../components/chat/ChatWindow'
 import HITLModal from '../components/chat/HITLModal'
+import { v4 as uuidv4 } from 'uuid'
 
 export default function DashboardPage() {
-  const { setConversations, setActiveConversation, activeConversationId } = useChatStore()
+  const { setConversations, setActiveConversation, setMessages, activeConversationId } = useChatStore()
   const logout = useAuthStore((s) => s.logout)
   const [loading, setLoading] = useState(true)
 
@@ -15,9 +16,26 @@ export default function DashboardPage() {
     const loadConversations = async () => {
       try {
         const res = await conversationsAPI.list()
-        setConversations(res.data.conversations)
-        if (res.data.conversations.length > 0) {
-          setActiveConversation(res.data.conversations[0].id)
+        const convs = res.data.conversations
+        setConversations(convs)
+
+        if (convs.length > 0) {
+          const firstId = convs[0].id
+          setActiveConversation(firstId)
+
+          // Fetch and restore message history for the first conversation
+          try {
+            const msgRes = await conversationsAPI.getMessages(firstId)
+            const msgs = msgRes.data.messages.map((m: any) => ({
+              id: m.id ?? uuidv4(),
+              role: m.role as 'user' | 'assistant',
+              content: m.content,
+              sources: m.sources ?? [],
+            }))
+            setMessages(firstId, msgs)
+          } catch {
+            // Non-critical: messages just won't be restored for this session
+          }
         }
       } catch {
         logout()

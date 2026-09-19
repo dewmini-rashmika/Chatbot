@@ -65,3 +65,31 @@ def log_evaluation(thread_id: str, query: str, response: str, sources: list, lat
                      sources=sources,
                      latency_ms=latency_ms,
                      timestamp=datetime.utcnow().isoformat())
+
+
+def setup_langsmith():
+    """
+    Activate LangSmith free-tier tracing by setting the required environment variables.
+    LangGraph / LangChain picks these up automatically — no code changes to the graph needed.
+
+    Set LANGCHAIN_API_KEY in your .env to enable.
+    If the key is missing or invalid, tracing is silently skipped.
+    """
+    from app.core.config import settings
+
+    if not settings.langchain_api_key or settings.langchain_api_key == "your-langsmith-api-key-here":
+        logging.getLogger(__name__).info(
+            "LangSmith tracing disabled — set LANGCHAIN_API_KEY in .env to enable."
+        )
+        return
+
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+    os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+    os.environ["LANGCHAIN_ENDPOINT"] = settings.langchain_endpoint
+
+    logging.getLogger(__name__).info(
+        "LangSmith tracing enabled -> project='%s' endpoint='%s'",
+        settings.langchain_project, settings.langchain_endpoint,
+    )
+

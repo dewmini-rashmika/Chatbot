@@ -36,9 +36,11 @@ RAG_SYSTEM_PROMPT = """You are an expert Music Knowledge Agent. You have access 
 
 CRITICAL RULES:
 1. Never reproduce song lyrics beyond 2-3 words (copyright protection).
-2. Always cite the source document, database record, or web URL when answering.
-3. If retrieval confidence is low, say so explicitly — do not hallucinate.
-4. Distinguish clearly between your knowledge and what documents say.
+2. If you use information from a Web Search, naturally weave the website name into your text (e.g., "According to Wikipedia...").
+3. DO NOT output bracketed source citations (e.g. avoid [Source: ...]).
+4. If some provided information is unrelated to the user's query, SILENTLY ignore it. Do not explain what you ignored. Do not provide disclaimers or notes about excluded information. Present your answer directly without referencing your databases, context, or search results in the text.
+5. If retrieval confidence is low, say so explicitly — do not hallucinate.
+6. Distinguish clearly between your knowledge and what documents say.
 
 When answering, use the retrieved context provided. If context is insufficient, 
 say the confidence is low rather than guessing.
@@ -107,7 +109,7 @@ async def rag_agent_node(state: AgentState) -> dict:
     # Filter out low-relevance vector results so we don't clutter sources with irrelevant PDFs
     valid_vector = []
     if not isinstance(vector_results, Exception):
-        valid_vector = [d for d in vector_results if d.get("score", 1.0) > 0.25]
+        valid_vector = [d for d in vector_results if d.get("score", 1.0) > 0.55]
 
     # Fuse internal results using RRF
     fused_context = reciprocal_rank_fusion(
@@ -117,15 +119,34 @@ async def rag_agent_node(state: AgentState) -> dict:
     
     # Inject real-time web context alongside the internal database context
     if web_results and web_results != "No results found." and not isinstance(web_results, Exception):
+        import re
+        from urllib.parse import urlparse
+        urls = re.findall(r'URL: (https?://[^\s]+)', str(web_results))
+        domains = []
+        for u in urls:
+            try:
+                netloc = urlparse(u).netloc.replace('www.', '')
+                parts = netloc.split('.')
+                name = parts[-2] if len(parts) > 1 else parts[0]
+                domains.append(name.capitalize())
+            except Exception:
+                pass
+        
+        # Deduplicate domains and keep order
+        seen = set()
+        unique_domains = [x for x in domains if not (x in seen or seen.add(x))]
+        domain_str = ", ".join(unique_domains)
+        source_name = f"Web Search ({domain_str})" if domain_str else "Web Search"
+
         fused_context.append({
             "id": "web_search",
-            "source": "Web Search (Tavily/DDG)",
+            "source": source_name,
             "content": str(web_results)
         })
 
     # Build context string for the LLM
     context_str = "\n\n---\n\n".join(
-        [f"[Source: {doc.get('source', 'Unknown')}]\n{doc.get('content', '')}"
+        [f"[{'Web Search Result' if 'Web' in str(doc.get('source', '')) else 'Internal Database'}]\n{doc.get('content', '')}"
          for doc in fused_context]
     )
     
@@ -147,10 +168,25 @@ async def rag_agent_node(state: AgentState) -> dict:
 
     response = await _llm.ainvoke(messages)
 
+    def _clean_source_name(raw_source: str) -> str:
+        s = str(raw_source)
+        if "PostgreSQL" in s:
+            return "Music Database"
+        if s.startswith("synthetic_review_"):
+            parts = s.replace("synthetic_review_", "").split("_")
+            return "Music Review: " + " ".join(parts)
+        if s.startswith("theory_"):
+            parts = s.replace("theory_", "").split("_")
+            return "Music Theory: " + " ".join(parts)
+        return s
+
     return {
         "retrieved_context": fused_context,
         "final_answer": response.content,
-        "sources": [{"source": d.get("source"), "id": d.get("id")} for d in fused_context],
+        "sources": [
+            {"source": _clean_source_name(d.get("source")), "id": str(d.get("id", ""))} 
+            for d in fused_context 
+        ],
         "current_agent": "reviewer_agent",
         "messages": [AIMessage(content=response.content)],
     }

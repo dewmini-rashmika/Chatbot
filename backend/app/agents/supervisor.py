@@ -1,4 +1,4 @@
-"""
+﻿"""
 Supervisor Agent — the orchestrator of all sub-agents.
 
 Architecture decision:
@@ -7,6 +7,7 @@ Architecture decision:
   - Each sub-agent is specialized and stateless — the Supervisor manages delegation.
   - Easier to extend: adding a new capability = adding a new sub-agent + routing rule.
 """
+import json
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -31,16 +32,21 @@ Available sub-agents:
   influences — anything requiring deep knowledge retrieval from documents or the music database.
 - "tool_agent": For actions or live data — current charts, now playing, playlist modification,
   web search, reading specific URLs, real-time Spotify data, or anything requiring external API calls.
-- "FINISH": When you have a final_answer ready to return to the user.
+- "finish": When you have a final_answer ready to return to the user.
 
-Respond with ONLY the sub-agent name to delegate to, nothing else.
+You must respond in JSON format ONLY:
+{
+  "agent": "agent_name",
+  "reasoning": "Brief explanation of why this agent was chosen",
+  "creative_intent": "If routing to creative_agent, describe the requested genre, mood, subject, and any structural requirements (e.g. 'blues song about a lost dog with chord progressions'). Otherwise leave empty."
+}
 """
 
 
 async def supervisor_node(state: AgentState) -> dict:
     """
     Supervisor node: reads the current state and decides which sub-agent to call next.
-    Returns a state update with the 'current_agent' field set.
+    Returns a state update with the 'current_agent' and 'task_description' fields set.
     """
     # If guardrails were triggered, end immediately
     if state.get("guardrail_triggered"):
@@ -60,7 +66,15 @@ async def supervisor_node(state: AgentState) -> dict:
     ]
 
     response = await _llm.ainvoke(messages)
-    next_agent = response.content.strip().lower()
+    
+    try:
+        raw = response.content.strip().strip("`json").strip("`").strip()
+        decision = json.loads(raw)
+        next_agent = decision.get("agent", "rag_agent").strip().lower()
+        creative_intent = decision.get("creative_intent", "")
+    except Exception:
+        next_agent = "rag_agent"
+        creative_intent = ""
 
     # Validate the routing decision
     valid_agents = {"rag_agent", "tool_agent", "chat_agent", "creative_agent", "finish"}
@@ -71,7 +85,10 @@ async def supervisor_node(state: AgentState) -> dict:
     if next_agent == "finish" and not state.get("final_answer"):
         next_agent = "chat_agent"
 
-    return {"current_agent": next_agent}
+    return {
+        "current_agent": next_agent,
+        "task_description": creative_intent if next_agent == "creative_agent" else state.get("task_description", "")
+    }
 
 
 def route_after_supervisor(state: AgentState) -> str:

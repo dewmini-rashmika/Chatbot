@@ -90,8 +90,37 @@ async def tool_agent_node(state: AgentState) -> dict:
     
     # Extract tools used as sources
     sources = []
-    for action, _ in intermediate_steps:
-        sources.append({"source": f"Tool: {action.tool}", "id": action.tool})
+    for action, observation in intermediate_steps:
+        if action.tool == "search_web":
+            import re
+            from urllib.parse import urlparse
+            urls = re.findall(r'URL: (https?://[^\s]+)', str(observation))
+            domains = []
+            for u in urls:
+                try:
+                    netloc = urlparse(u).netloc.replace('www.', '')
+                    parts = netloc.split('.')
+                    name = parts[-2] if len(parts) > 1 else parts[0]
+                    domains.append(name.capitalize())
+                except Exception:
+                    pass
+            seen = set()
+            unique_domains = [x for x in domains if not (x in seen or seen.add(x))]
+            domain_str = ", ".join(unique_domains)
+            source_name = f"Web Search ({domain_str})" if domain_str else "Web Search"
+            sources.append({"source": source_name, "id": action.tool})
+        elif action.tool == "read_url":
+            import re
+            from urllib.parse import urlparse
+            url = action.tool_input.get('url', str(action.tool_input))
+            try:
+                netloc = urlparse(url).netloc.replace('www.', '')
+                parts = netloc.split('.')
+                name = parts[-2] if len(parts) > 1 else parts[0]
+                domain_str = name.capitalize()
+            except Exception:
+                domain_str = "Url"
+            sources.append({"source": f"Web Search ({domain_str})", "id": action.tool})
         
     return {
         "tool_results": intermediate_steps,

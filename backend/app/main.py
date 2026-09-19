@@ -29,12 +29,13 @@ from slowapi.util import get_remote_address
 from app.agents.graph import init_graph
 from app.api.v1.endpoints import auth, chat, conversations
 from app.core.config import settings
-from app.core.logging_config import setup_logging
+from app.core.logging_config import setup_logging, setup_langsmith
 from app.core.middleware import PIIScrubbingMiddleware, RequestLoggingMiddleware
 from app.db.database import engine
 from app.models.models import Base
 
 setup_logging()
+setup_langsmith()
 logger = structlog.get_logger(__name__)
 
 # Rate limiter — 60 requests/minute per IP (generous for dev, tighten for prod)

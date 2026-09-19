@@ -1,4 +1,4 @@
-"""
+﻿"""
 Reviewer Sub-Agent — Quality gate and HITL arbiter.
 
 This agent sits between all sub-agents and the final output.
@@ -38,9 +38,10 @@ Respond in JSON format ONLY:
 }
 
 Guardrail rules to check:
-- Does the answer reproduce more than 3 words of song lyrics? → fail
-- Is the answer off-topic (not music-related)? → fail
-- IMPORTANT: Do NOT fact-check the answer. Assume the agent's summary is correct. Only fail if the answer is blatantly off-topic or reproduces copyright lyrics.
+- Does the answer reproduce more than 3 words of real copyrighted song lyrics? -> fail
+- Is the answer off-topic (not music-related)? -> fail (EXCEPTION: Original songs, poetry, and creative lyrics are ALWAYS considered on-topic and should pass).
+- IMPORTANT - CREATIVE WORKS EXCEPTION: If the answer is an original song, poem, or creative writing piece, do NOT fact-check it. Original creative works must be approved with high confidence (e.g., 1.0) as long as they don't violate copyright.
+- For factual answers: assume the agent's summary is correct based on the context. Only fail if the answer is blatantly off-topic or reproduces copyright lyrics.
 """
 
 
@@ -86,7 +87,7 @@ async def reviewer_agent_node(state: AgentState) -> dict:
 
     try:
         # Strip markdown code fences if present
-        raw = response.content.strip().strip("```json").strip("```").strip()
+        raw = response.content.strip().strip("`json").strip("`").strip()
         review = json.loads(raw)
     except Exception:
         # If parsing fails, be conservative — pass through with medium confidence

@@ -1,12 +1,20 @@
-import { useState } from 'react'
+﻿import { useState } from 'react'
 import { PlusCircle, MessageSquare, Trash2, LogOut, Music } from 'lucide-react'
+import { v4 as uuidv4 } from 'uuid'
 import { conversationsAPI } from '../../services/api'
 import { useChatStore } from '../../store/chatStore'
 import { useAuthStore } from '../../store/authStore'
 import clsx from 'clsx'
 
 export default function Sidebar() {
-  const { conversations, setConversations, activeConversationId, setActiveConversation } = useChatStore()
+  const {
+    conversations,
+    setConversations,
+    activeConversationId,
+    setActiveConversation,
+    setMessages,
+    loadedConversations,
+  } = useChatStore()
   const { user, logout } = useAuthStore()
   const [creating, setCreating] = useState(false)
 
@@ -17,8 +25,31 @@ export default function Sidebar() {
       const newConv = res.data
       setConversations([newConv, ...conversations])
       setActiveConversation(newConv.id)
+      // New conversation starts with empty messages — no fetch needed
+      setMessages(newConv.id, [])
     } finally {
       setCreating(false)
+    }
+  }
+
+  const selectConversation = async (id: string) => {
+    setActiveConversation(id)
+
+    // Only fetch from API if we haven't loaded this conversation yet
+    if (!loadedConversations.has(id)) {
+      try {
+        const msgRes = await conversationsAPI.getMessages(id)
+        const msgs = msgRes.data.messages.map((m: any) => ({
+          id: m.id ?? uuidv4(),
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          sources: m.sources ?? [],
+        }))
+        setMessages(id, msgs)
+      } catch {
+        // Non-critical — show empty chat if fetch fails
+        setMessages(id, [])
+      }
     }
   }
 
@@ -28,7 +59,7 @@ export default function Sidebar() {
     const updated = conversations.filter((c) => c.id !== id)
     setConversations(updated)
     if (activeConversationId === id && updated.length > 0) {
-      setActiveConversation(updated[0].id)
+      selectConversation(updated[0].id)
     }
   }
 
@@ -60,7 +91,7 @@ export default function Sidebar() {
           conversations.map((conv) => (
             <button
               key={conv.id}
-              onClick={() => setActiveConversation(conv.id)}
+              onClick={() => selectConversation(conv.id)}
               className={clsx(
                 'w-full flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors group',
                 activeConversationId === conv.id

@@ -1,10 +1,15 @@
-import { create } from 'zustand'
+﻿import { create } from 'zustand'
+
+export interface Source {
+  source: string
+  id: string
+}
 
 export interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources?: { source: string; id: string }[]
+  sources?: Source[]
   isStreaming?: boolean
 }
 
@@ -19,9 +24,12 @@ interface ChatState {
   conversations: Conversation[]
   activeConversationId: string | null
   messages: Record<string, Message[]>
+  /** Track which conversation IDs have already been fetched from the DB */
+  loadedConversations: Set<string>
   hitlPending: { thread_id: string; action: string } | null
   setConversations: (convs: Conversation[]) => void
   setActiveConversation: (id: string) => void
+  setMessages: (convId: string, msgs: Message[]) => void
   addMessage: (convId: string, msg: Message) => void
   updateLastMessage: (convId: string, chunk: string) => void
   finalizeLastMessage: (convId: string, sources?: Message['sources'], content?: string) => void
@@ -32,6 +40,7 @@ export const useChatStore = create<ChatState>((set) => ({
   conversations: [],
   activeConversationId: null,
   messages: {},
+  loadedConversations: new Set(),
   hitlPending: null,
 
   setConversations: (convs) => set({ conversations: convs }),
@@ -40,6 +49,12 @@ export const useChatStore = create<ChatState>((set) => ({
     set((s) => ({
       activeConversationId: id,
       messages: s.messages[id] ? s.messages : { ...s.messages, [id]: [] },
+    })),
+
+  setMessages: (convId, msgs) =>
+    set((s) => ({
+      messages: { ...s.messages, [convId]: msgs },
+      loadedConversations: new Set([...s.loadedConversations, convId]),
     })),
 
   addMessage: (convId, msg) =>

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Conversations API — create, list, fetch, delete chat threads.
 """
 import uuid
@@ -9,11 +9,13 @@ from sqlalchemy.future import select
 
 from app.core.dependencies import get_current_user
 from app.db.database import get_db
-from app.models.models import Conversation, User
+from app.models.models import Conversation, Message, User
 from app.schemas.schemas import (
     ConversationCreateRequest,
     ConversationListResponse,
+    ConversationMessagesResponse,
     ConversationResponse,
+    MessageResponse,
 )
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -51,6 +53,39 @@ async def list_conversations(
     )
     conversations = result.scalars().all()
     return ConversationListResponse(conversations=list(conversations), total=len(conversations))
+
+
+@router.get("/{conversation_id}/messages", response_model=ConversationMessagesResponse)
+async def get_conversation_messages(
+    conversation_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch all messages for a conversation (must belong to the current user).
+    Used by the frontend to restore chat history after page refresh or server restart.
+    """
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
+        )
+    )
+    conv = result.scalar_one_or_none()
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    msg_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+    )
+    messages = msg_result.scalars().all()
+
+    return ConversationMessagesResponse(
+        conversation_id=conversation_id,
+        messages=[MessageResponse.from_orm_message(m) for m in messages],
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)

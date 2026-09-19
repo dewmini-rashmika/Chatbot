@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     max_lyric_chars: int = 50
     confidence_threshold: float = 0.6
 
+    # ── LangSmith Observability (free tier) ───────────────────────────────────
+    langchain_tracing_v2: str = "false"
+    langchain_api_key: str | None = None
+    langchain_project: str = "music-agent"
+    langchain_endpoint: str = "https://api.smith.langchain.com"
+
 
 @lru_cache()
 def get_settings() -> Settings:

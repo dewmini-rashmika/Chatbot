@@ -34,6 +34,7 @@ export const conversationsAPI = {
   list: () => api.get('/conversations/'),
   create: (title?: string) => api.post('/conversations/', { title: title ?? 'New Conversation' }),
   get: (id: string) => api.get(`/conversations/${id}`),
+  getMessages: (id: string) => api.get(`/conversations/${id}/messages`),
   delete: (id: string) => api.delete(`/conversations/${id}`),
 }
 

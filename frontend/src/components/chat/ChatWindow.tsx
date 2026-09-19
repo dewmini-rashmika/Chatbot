@@ -10,6 +10,15 @@ interface Props {
   conversationId: string
 }
 
+/**
+ * Returns true only if the source string is a real web URL.
+ * Tool names (e.g. "sql_rag", "chroma_search") and local DB identifiers
+ * are filtered out — only Tavily/web results that start with http(s) are shown.
+ */
+function isWebUrl(source: string): boolean {
+  return source.startsWith('http://') || source.startsWith('https://')
+}
+
 export default function ChatWindow({ conversationId }: Props) {
   const messages = useChatStore((s) => s.messages[conversationId] ?? [])
   const { sendMessage } = useChat()
@@ -68,19 +77,51 @@ export default function ChatWindow({ conversationId }: Props) {
                       {msg.content || (msg.isStreaming ? '▋' : '')}
                     </ReactMarkdown>
                   </div>
-                  {/* Source citations */}
-                  {msg.sources && msg.sources.length > 0 && (
-                    <div className="mt-2 pt-2 border-t border-gray-700">
-                      <p className="text-xs text-gray-500 font-medium mb-1">Sources</p>
-                      <div className="flex flex-wrap gap-1">
-                        {msg.sources.slice(0, 4).map((s, i) => (
-                          <span key={i} className="text-xs bg-gray-700 text-gray-300 rounded-md px-2 py-0.5 truncate max-w-[200px]">
-                            {s.source}
-                          </span>
-                        ))}
+
+                  {/* Show all sources passed by backend. Render links if URL, otherwise plain pills. */}
+                  {(() => {
+                    const allSources = msg.sources ?? []
+                    if (allSources.length === 0) return null
+                    return (
+                      <div className="mt-2 pt-2 border-t border-gray-700">
+                        <p className="text-xs text-gray-500 font-medium mb-1">Sources</p>
+                        <div className="flex flex-wrap gap-1">
+                          {allSources.slice(0, 4).map((s, i) => {
+                            const isUrl = s.source.startsWith('http://') || s.source.startsWith('https://')
+                            if (isUrl) {
+                              try {
+                                const hostname = new URL(s.source).hostname.replace('www.', '')
+                                return (
+                                  <a
+                                    key={i}
+                                    href={s.source}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-xs bg-gray-700 text-violet-300 hover:text-violet-200 rounded-md px-2 py-0.5 truncate max-w-[220px] hover:bg-gray-600 transition-colors"
+                                    title={s.source}
+                                  >
+                                    {hostname}
+                                  </a>
+                                )
+                              } catch {
+                                // fallback if URL parse fails
+                              }
+                            }
+                            // Plain text source pill
+                            return (
+                              <span
+                                key={i}
+                                className="text-xs bg-gray-700 text-gray-300 rounded-md px-2 py-0.5 truncate max-w-[220px]"
+                                title={s.source}
+                              >
+                                {s.source}
+                              </span>
+                            )
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    )
+                  })()}
                 </>
               ) : (
                 <p>{msg.content}</p>
