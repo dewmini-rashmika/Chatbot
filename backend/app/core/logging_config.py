@@ -1,95 +1,112 @@
-import logging
-from logging.handlers import TimedRotatingFileHandler
-import os
-import structlog
-import sys
-from datetime import datetime
+"""
+Structured logging setup using structlog + stdlib logging.
+Writes JSON logs to both stdout and rotating log files.
+"""
 
-def setup_logging():
-    # Create logs directory
+import os
+import sys
+import logging
+import logging.handlers
+import structlog
+from datetime import datetime
+from app.core.config import settings
+
+
+def setup_logging() -> None:
+    """Configure structlog with JSON rendering for production, pretty for dev."""
     log_dir = os.path.join(os.getcwd(), "logs")
     os.makedirs(log_dir, exist_ok=True)
-
-    # 1. Setup standard Python logging for daily rotation
-    # App log
-    app_log_path = os.path.join(log_dir, "app.log")
-    app_handler = TimedRotatingFileHandler(app_log_path, when="midnight", interval=1, backupCount=30)
-    app_handler.suffix = "%Y-%m-%d"
-    
-    # Eval log (for QA and evaluations)
+    app_log_path  = os.path.join(log_dir, "app.log")
     eval_log_path = os.path.join(log_dir, "evaluations.log")
-    eval_handler = TimedRotatingFileHandler(eval_log_path, when="midnight", interval=1, backupCount=30)
-    eval_handler.suffix = "%Y-%m-%d"
 
-    # Console handler
+    # ── stdlib root logger ────────────────────────────────────────────────────
+    app_handler = logging.handlers.TimedRotatingFileHandler(
+        app_log_path, when="midnight", backupCount=7, encoding="utf-8"
+    )
+    app_handler.suffix = "%Y%m%d"
+
     console_handler = logging.StreamHandler(sys.stdout)
 
     logging.basicConfig(
         level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[app_handler, console_handler],
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    # Separate logger specifically for evaluations
-    eval_logger = logging.getLogger("evaluations")
-    eval_logger.setLevel(logging.INFO)
-    eval_logger.propagate = False # Don't double log to app
-    eval_logger.addHandler(eval_handler)
+    # Silence noisy third-party loggers
+    for noisy in ("httpx", "httpcore", "chromadb", "litellm"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    # 2. Configure structlog to bridge to standard logging
+    # ── Evaluation logger (separate file, no rotation) ────────────────────────
+    eval_logger = logging.getLogger("evaluations")
+    eval_handler = logging.FileHandler(eval_log_path, encoding="utf-8")
+    eval_logger.addHandler(eval_handler)
+    eval_logger.propagate = False
+
+    # ── structlog processors ──────────────────────────────────────────────────
+    processors: list = [
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.stdlib.PositionalArgumentsFormatter(),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+    ]
+
+    if settings.app_env == "development":
+        processors.append(structlog.dev.ConsoleRenderer())
+    else:
+        processors.append(structlog.processors.JSONRenderer())
+
     structlog.configure(
-        processors=[
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer() # JSON format for the file
-        ],
-        context_class=dict,
+        processors=processors,
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
 
-def log_evaluation(thread_id: str, query: str, response: str, sources: list, latency_ms: float = 0.0):
-    """
-    Helper function to log structured evaluations.
-    """
-    eval_logger = structlog.get_logger("evaluations")
-    eval_logger.info("evaluation_record",
-                     thread_id=thread_id,
-                     query=query,
-                     response=response,
-                     sources=sources,
-                     latency_ms=latency_ms,
-                     timestamp=datetime.utcnow().isoformat())
 
-
-def setup_langsmith():
+def setup_langsmith() -> None:
     """
     Activate LangSmith free-tier tracing by setting the required environment variables.
     LangGraph / LangChain picks these up automatically — no code changes to the graph needed.
 
     Set LANGCHAIN_API_KEY in your .env to enable.
-    If the key is missing or invalid, tracing is silently skipped.
+    If the key is blank or the placeholder, tracing is silently disabled.
     """
-    from app.core.config import settings
+    log = structlog.get_logger(__name__)
 
-    if not settings.langchain_api_key or settings.langchain_api_key == "your-langsmith-api-key-here":
-        logging.getLogger(__name__).info(
-            "LangSmith tracing disabled — set LANGCHAIN_API_KEY in .env to enable."
-        )
+    placeholder = "your-langsmith-api-key-here"
+    api_key = settings.langchain_api_key
+
+    if not api_key or api_key == placeholder:
+        log.info("LangSmith tracing disabled — set LANGCHAIN_API_KEY in .env to enable.")
         return
 
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
-    os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
-    os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
-    os.environ["LANGCHAIN_ENDPOINT"] = settings.langchain_endpoint
+    os.environ["LANGCHAIN_TRACING_V2"]  = "true"
+    os.environ["LANGCHAIN_API_KEY"]      = api_key
+    os.environ["LANGCHAIN_PROJECT"]      = settings.langchain_project
+    os.environ["LANGCHAIN_ENDPOINT"]     = settings.langchain_endpoint
+    log.info("LangSmith tracing enabled -> project='%s' endpoint='%s'",
+             settings.langchain_project, settings.langchain_endpoint)
 
-    logging.getLogger(__name__).info(
-        "LangSmith tracing enabled -> project='%s' endpoint='%s'",
-        settings.langchain_project, settings.langchain_endpoint,
+
+def log_evaluation(
+    query: str,
+    response: str,
+    sources: list[str],
+    latency_ms: float,
+    thread_id: str = "",
+) -> None:
+    """Helper function to log structured evaluations."""
+    eval_logger = logging.getLogger("evaluations")
+    eval_logger.info(
+        str({
+            "ts":         datetime.utcnow().isoformat(),
+            "thread_id":  thread_id,
+            "query":      query[:200],
+            "response":   response[:500],
+            "sources":    sources,
+            "latency_ms": round(latency_ms, 2),
+        })
     )
-

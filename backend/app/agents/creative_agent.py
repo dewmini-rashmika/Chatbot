@@ -1,63 +1,70 @@
-from langchain_groq import ChatGroq
-from langchain_core.messages import AIMessage, SystemMessage
+"""
+Creative Sub-Agent — original songwriting, lyrics, and music poetry.
 
+Handles requests for original creative writing about music.
+Routes directly to END, bypassing the strict factual reviewer checks
+(creative output cannot be "fact-checked" against a knowledge base).
+
+LLM choice: groq/llama-3.3-70b-versatile (via LiteLLM)
+  Swap via CREATIVE_MODEL env var.
+"""
+
+import structlog
+from langchain_core.messages import AIMessage
 from app.agents.state import AgentState
-from app.core.config import settings
+from app.core.llm_factory import call_llm, get_model_for_role
 
-_llm = ChatGroq(
-    model="qwen/qwen3.8-27b",
-    max_tokens=2000,
-    groq_api_key=settings.groq_api_key,
-    temperature=0.92,
-    streaming=True,
-)
+logger = structlog.get_logger(__name__)
 
 CREATIVE_SYSTEM_PROMPT = """You are a Master Songwriter, Lyricist, and Music Poet with encyclopedic genre knowledge.
 Your role is to write original lyrics, compose poetry about music, and describe musical aesthetics in a highly evocative, artistic way.
 
 # CORE RULES
-1. **Be Original:** NEVER reproduce real copyrighted song lyrics. Create 100% original content.
-2. **Be Structured:** When writing a song, include clear section headers (e.g., [Verse 1], [Chorus], [Bridge], [Outro]).
-3. **Be Authentic:** Adapt your vocabulary, rhyme scheme, and structure to fit the requested genre exactly.
-   - *Blues*: Use AAB stanza structure, gritty metaphors, and 12-bar pacing.
-   - *Hip-Hop*: Use dense internal rhymes, multi-syllabic schemes, and rhythmic flow.
-   - *Country*: Focus on storytelling, narrative arcs, and conversational phrasing.
-   - *Pop*: Build toward a massive, emotionally resonant, unforgettable hook (Chorus).
-   - *Musical Theatre*: Focus on character desire ("I Want" song), dynamic shifts, and plot movement.
-4. **Prosody & Flow:** Match stress patterns to a natural implied melody. Rhymes should feel unforced; use slant rhymes if it helps the emotional truth.
-5. **Chord Progressions:** ALWAYS include stylistic chord progression suggestions inline next to section headers (e.g., [Chorus — Am  F  C  G]) to help the user imagine the music.
-6. **Enforce Strict Formatting:** Output lyrics using strict line breaks. Never format verses or choruses as a single paragraph block. Use double line breaks to separate song sections.
-7. **Control the Tone and Vocabulary:** Adapt your vocabulary strictly to the chosen genre. Avoid overly dramatic, melodramatic, or morbid words (e.g., 'death', 'bleeding') unless explicitly requested or appropriate for heavier genres. Keep R&B and Neo-Soul smooth, atmospheric, and grounded.
-8. **Prioritize Singability and Meter:** Pay close attention to syllable counts and meter. Ensure lines have a natural, conversational rhythm that easily fits the requested BPM. Avoid overly wordy or clunky sentences that disrupt a singer's flow.
-9. **Personalization:** If you are given user memories about their musical tastes, try to subtly incorporate those preferences into the aesthetic, instrumentation suggestions, or vocabulary of the song/poem.
+1. **Be Original:** NEVER reproduce real copyrighted song lyrics. Only write NEW, original content.
+2. **Be Specific:** Use genre-accurate language, instruments, moods, and imagery.
+3. **Be Artistic:** Prioritize emotional resonance, vivid imagery, and musicality of language.
+4. **Respect Intent:** Match the user's requested genre, mood, era, and style as closely as possible.
 
-# CONTEXT
-If a specific intent or topic was extracted by the supervisor, it will be provided as the "Task". 
-Use the user's memories to tailor the output to their known preferences.
-
-Embrace artistic freedom, write beautiful prose, and craft a song that feels ready to be recorded.
+# FORMAT
+- For lyrics: include clear section labels (Verse 1, Chorus, Bridge, etc.)
+- For poetry: use appropriate line breaks and stanza structure.
+- For aesthetic descriptions: write in flowing, evocative prose.
 """
+
 
 async def creative_agent_node(state: AgentState) -> dict:
     """
     Creative sub-agent node: handles original poetry, songwriting, and aesthetic descriptions.
     Routes directly to END to bypass strict factual reviewer checks.
     """
-    memories_str = "\n".join(state.get("user_memories", []))
-    task_desc = state.get("task_description", "")
-    
-    prompt = CREATIVE_SYSTEM_PROMPT
-    if memories_str:
-        prompt += f"\n\nUSER MEMORIES:\n{memories_str}"
-    if task_desc:
-        prompt += f"\n\nTASK INTENT:\n{task_desc}"
+    messages         = state["messages"]
+    task_description = state.get("task_description", "")
+    user_memories    = state.get("user_memories", [])
 
-    messages = [SystemMessage(content=prompt)] + state["messages"][-6:]
+    # Prefer task_description (set by supervisor) over raw message
+    prompt = task_description or (messages[-1].content if messages else "")
 
-    response = await _llm.ainvoke(messages)
+    model = get_model_for_role("creative")
+    logger.info("creative_agent.start", prompt=prompt[:80], model=model)
+
+    # Inject any relevant user preferences
+    memories_str = ""
+    if user_memories:
+        memories_str = "\n\nUSER MEMORIES:\n" + "\n".join(f"- {m}" for m in user_memories)
+
+    llm_messages = [
+        {"role": "system", "content": CREATIVE_SYSTEM_PROMPT},
+        {"role": "user",   "content": f"{prompt}{memories_str}"},
+    ]
+
+    response = await call_llm(
+        role="creative",
+        messages=llm_messages,
+        temperature=0.9,   # high creativity
+    )
+    answer = response.choices[0].message.content
 
     return {
-        "final_answer": response.content,
-        "current_agent": "FINISH",
-        "messages": [AIMessage(content=response.content)],
+        "messages":     [AIMessage(content=answer)],
+        "final_answer": answer,
     }

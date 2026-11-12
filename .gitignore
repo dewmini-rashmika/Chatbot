@@ -157,6 +157,52 @@ ENV/
 env.bak/
 venv.bak/
 
+# ── Project-specific: Backend ─────────────────────────────────────────────────
+
+# Secret config — never commit real credentials
+backend/.env
+
+# Virtual environment
+backend/.venv/
+
+# Log files (runtime output, not source)
+backend/logs/
+*.log
+
+# ChromaDB vector store (large binary files, rebuilt on ingest)
+backend/data/chroma_store/
+
+# SQLite databases (local dev only)
+*.sqlite3
+
+# Pickle files (binary serialised data)
+*.pickle
+
+# Python bytecode (already covered above, repeated for clarity)
+backend/**/__pycache__/
+backend/**/*.pyc
+
+# ── Project-specific: Frontend ────────────────────────────────────────────────
+
+# npm/yarn dependencies (installed via package manager)
+frontend/node_modules/
+
+# Build output (generated from source, not source itself)
+frontend/dist/
+
+# TypeScript incremental build cache
+frontend/tsconfig.tsbuildinfo
+
+# Vite cache
+frontend/.vite/
+
+# ── OS and editor noise ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/settings.json
+
 # Spyder project settings
 .spyderproject
 .spyproject

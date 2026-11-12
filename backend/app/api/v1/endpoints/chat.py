@@ -5,156 +5,89 @@ This is the core endpoint that powers the real-time chat interface.
 Why SSE over WebSockets?
 - SSE is simpler and perfect for one-directional streaming (server -> client).
 - Native browser support -- no extra library needed in React.
-- Works through proxies and load balancers more reliably than WebSockets.
-- WebSockets would be used for true bidirectional comms (e.g., voice).
+- Works through standard HTTP proxies and load balancers.
 """
+
 import json
-import uuid
-from datetime import datetime
-
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-
 import time
+import uuid
+import structlog
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.future import select
+from langchain_core.messages import HumanMessage
 from app.agents.graph import get_graph
 from app.core.dependencies import get_current_user
-from app.db.database import AsyncSessionLocal, get_db
+from app.core.logging_config import log_evaluation
+from app.db.database import get_db, AsyncSessionLocal
 from app.guardrails.guardrails import check_input_guardrails, check_output_guardrails
 from app.models.models import Conversation, Message, User
 from app.schemas.schemas import ChatRequest, HITLDecisionRequest
 from app.services.memory_service import LongTermMemoryService
-from app.core.logging_config import log_evaluation
 
-router = APIRouter(prefix="/chat", tags=["Chat"])
-memory_service = LongTermMemoryService()
+logger = structlog.get_logger(__name__)
 
-
-async def _save_assistant_message(conversation_id: uuid.UUID, content: str, sources: list):
-    """
-    Background task: persist the assistant reply to the DB after streaming ends.
-    Opens its own session so it runs safely outside the original request scope.
-    """
-    async with AsyncSessionLocal() as db:
-        try:
-            msg = Message(
-                conversation_id=conversation_id,
-                role="assistant",
-                content=content,
-                extra_data={"sources": sources} if sources else None,
-            )
-            db.add(msg)
-            await db.commit()
-        except Exception:
-            await db.rollback()
+router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 async def _stream_agent_response(
-    user_message: str,
-    thread_id: str,
-    user_id: str,
-    user_memories: list[str],
+    graph,
+    initial_state: dict,
+    config: dict,
 ):
     """
     Generator that streams agent execution events as SSE.
     Each event is a JSON string with an 'event' type and 'data' payload.
     """
-    start_time = time.time()
+    async def send_event(event_type: str, data: dict) -> str:
+        return f"data: {json.dumps({'event': event_type, 'data': data})}\n\n"
 
-    async def send_event(event: str, data: str | dict) -> str:
-        payload = json.dumps({"event": event, "data": data})
-        return f"data: {payload}\n\n"
+    final_answer_parts: list[str] = []
+    sources_captured:   list[str] = []
 
-    # -- Input guardrail check -----------------------------------------------
-    guard = check_input_guardrails(user_message)
-    if not guard.passed:
-        yield await send_event("guardrail_blocked", guard.reason)
-        yield await send_event("done", "")
-        latency = (time.time() - start_time) * 1000
-        log_evaluation(thread_id, user_message, guard.reason, [], latency)
-        return
+    yield await send_event("agent_start", {"message": "Routing your question to the right specialist..."})
 
-    yield await send_event("thinking", "Routing your question to the right specialist...")
-
-    graph = await get_graph()
-
-    initial_state = {
-        "messages": [HumanMessage(content=user_message)],
-        "user_id": user_id,
-        "thread_id": thread_id,
-        "user_memories": user_memories,
-        "current_agent": "",
-        "task_description": user_message,
-        "retrieved_context": [],
-        "tool_results": [],
-        "confidence_score": 0.0,
-        "guardrail_triggered": False,
-        "guardrail_reason": "",
-        "hitl_required": False,
-        "hitl_action": "",
-        "hitl_approved": None,
-        "final_answer": "",
-        "sources": [],
-    }
-
-    config = {"configurable": {"thread_id": thread_id}}
-
-    # Stream events from LangGraph
-    async for event in graph.astream_events(initial_state, config=config, version="v2"):
+    async for event in graph.astream_events(initial_state, config=config, version="v1"):
         kind = event.get("event", "")
         name = event.get("name", "")
 
-        if kind == "on_chain_start" and name in ("rag_agent", "tool_agent", "supervisor"):
-            yield await send_event("agent_start", f"🤖 {name.replace('_', ' ').title()} is working...")
-
-        elif kind == "on_llm_stream":
+        # Stream LLM tokens as they arrive
+        if kind == "on_llm_stream":
             chunk = event.get("data", {}).get("chunk", {})
-            if hasattr(chunk, "content") and chunk.content:
-                yield await send_event("token", chunk.content)
+            token = ""
+            if hasattr(chunk, "content"):
+                token = chunk.content
+            elif isinstance(chunk, dict):
+                token = chunk.get("content", "")
+            if token:
+                final_answer_parts.append(token)
+                yield await send_event("token", {"token": token})
 
+        # Announce tool calls to the frontend
         elif kind == "on_tool_start":
             tool_name = event.get("data", {}).get("input", {})
-            yield await send_event("tool_start", f"🔧 Using tool: {name}")
+            yield await send_event("tool_start", {"tool": name, "input": str(tool_name)[:200]})
 
-        elif kind == "on_tool_end":
-            yield await send_event("tool_end", f"✅ Tool completed: {name}")
+        # Capture sources from chain outputs
+        elif kind == "on_chain_end":
+            d = event.get("data", {}).get("output", {})
+            if isinstance(d, dict):
+                for src in d.get("retrieved_context", []):
+                    source = src.get("source", src.get("_source", ""))
+                    if source and source not in sources_captured:
+                        sources_captured.append(source)
 
-        elif kind == "on_chain_end" and name in ("reviewer_agent", "tool_agent"):
-            state = event.get("data", {}).get("output", {})
-            if state and state.get("hitl_required"):
-                yield await send_event("hitl_required", {
-                    "action": state.get("hitl_action", ""),
-                    "thread_id": thread_id,
-                })
-                latency = (time.time() - start_time) * 1000
-                log_evaluation(thread_id, user_message, "[HITL PAUSED]", [], latency)
-                return  # Pause -- frontend must call /hitl-decision
-
-    # Get the final state
-    final_state = await graph.aget_state(config)
-    final_answer = final_state.values.get("final_answer", "")
-    sources = final_state.values.get("sources", [])
-
-    # -- Output guardrail check -----------------------------------------------
-    out_guard = check_output_guardrails(final_answer)
-    if not out_guard.passed:
-        yield await send_event("guardrail_blocked", out_guard.reason)
-        latency = (time.time() - start_time) * 1000
-        log_evaluation(thread_id, user_message, out_guard.reason, [], latency)
-    else:
-        yield await send_event("final_answer", {
-            "content": final_answer,
-            "sources": sources,
-        })
-        latency = (time.time() - start_time) * 1000
-        log_evaluation(thread_id, user_message, final_answer, sources, latency)
-
-    yield await send_event("done", "")
+    # Emit the done event with the full answer and sources
+    final_answer = "".join(final_answer_parts)
+    yield await send_event("done", {
+        "answer":  final_answer,
+        "sources": sources_captured[:5],
+    })
 
 
-@router.post("/stream")
+@router.post("")
 async def stream_chat(
     payload: ChatRequest,
     background_tasks: BackgroundTasks,
@@ -168,9 +101,9 @@ async def stream_chat(
     Message persistence strategy:
     - User message is saved + committed BEFORE streaming starts (safe, synchronous).
     - Assistant message is saved AFTER streaming ends via a BackgroundTask that
-      opens its own DB session, avoiding session-scope conflicts with SSE.
+      opens its own DB session (the request session will be closed by then).
     """
-    # Verify conversation belongs to user
+    # ── 1. Validate conversation belongs to user ──────────────────────────────
     result = await db.execute(
         select(Conversation).where(
             Conversation.id == payload.conversation_id,
@@ -181,8 +114,17 @@ async def stream_chat(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    # Persist user message and commit immediately (before streaming begins)
+    # ── 2. Input guardrails ───────────────────────────────────────────────────
+    guard = check_input_guardrails(payload.message)
+    if not guard.passed:
+        async def _blocked_stream():
+            yield f"data: {json.dumps({'event': 'token', 'data': {'token': guard.reason}})}\n\n"
+            yield f"data: {json.dumps({'event': 'done', 'data': {'answer': guard.reason, 'sources': []}})}\n\n"
+        return StreamingResponse(_blocked_stream(), media_type="text/event-stream")
+
+    # ── 3. Save user message ──────────────────────────────────────────────────
     user_msg = Message(
+        id=uuid.uuid4(),
         conversation_id=conv.id,
         role="user",
         content=payload.message,
@@ -190,65 +132,94 @@ async def stream_chat(
     db.add(user_msg)
     await db.commit()
 
-    # Load long-term memories for personalization
-    user_memories = await memory_service.recall(current_user.id, db)
+    # ── 4. Recall long-term memories for personalization ──────────────────────
+    memory_service = LongTermMemoryService()
+    user_memories = await memory_service.recall(str(current_user.id), db)
 
-    # Schedule background task to save assistant reply once streaming ends.
-    # We pass a coroutine factory; FastAPI's BackgroundTasks will call it after response.
-    # We capture conv.id and thread_id now (before session closes).
-    conv_id = conv.id
-    thread_id = conv.thread_id
-
-    async def _save_reply_after_stream():
-        """
-        Runs the full stream and then persists the assistant message.
-        This is NOT called as a BackgroundTask directly -- instead we wrap
-        the generator so the save happens naturally at stream end.
-        """
-        pass  # handled inline in the wrapped generator below
+    # ── 5. Build initial graph state ──────────────────────────────────────────
+    graph        = get_graph()
+    thread_id    = conv.thread_id
+    config       = {"configurable": {"thread_id": thread_id}}
+    start_time   = time.time()
+    initial_state = {
+        "messages":          [HumanMessage(content=payload.message)],
+        "user_memories":     user_memories,
+        "hitl_required":     False,
+        "hitl_approved":     False,
+        "guardrail_triggered": False,
+    }
 
     async def _stream_and_save():
         """Wraps the SSE generator and persists the assistant reply when done."""
-        final_answer_parts: list[str] = []
-        sources_captured: list = []
+        final_parts: list[str] = []
+        final_sources: list[str] = []
 
-        async for chunk in _stream_agent_response(
-            user_message=payload.message,
-            thread_id=thread_id,
-            user_id=str(current_user.id),
-            user_memories=user_memories,
-        ):
-            # Intercept final_answer event to capture content + sources for DB
+        async for chunk in _stream_agent_response(graph, initial_state, config):
+            yield chunk
+            # Parse token/done events to capture the full answer
             try:
-                line = chunk
-                if line.startswith("data: "):
-                    parsed = json.loads(line[6:])
-                    if parsed.get("event") == "final_answer":
-                        d = parsed.get("data", {})
-                        final_answer_parts.append(d.get("content", ""))
-                        sources_captured = d.get("sources", [])
-                    elif parsed.get("event") == "guardrail_blocked":
-                        final_answer_parts.append("⚠️ " + str(parsed.get("data", "")))
+                parsed = json.loads(chunk.removeprefix("data: ").strip())
+                if parsed.get("event") == "token":
+                    final_parts.append(parsed["data"].get("token", ""))
+                elif parsed.get("event") == "done":
+                    final_sources = parsed["data"].get("sources", [])
             except Exception:
                 pass
-            yield chunk
 
-        # After stream ends, persist assistant message directly
-        if final_answer_parts:
-            await _save_assistant_message(
-                conv_id,
-                "".join(final_answer_parts),
-                sources_captured,
+        # Save the assistant reply after streaming
+        full_answer = "".join(final_parts)
+        latency = round((time.time() - start_time) * 1000, 2)
+
+        # Output guardrail check
+        out_guard = check_output_guardrails(full_answer)
+        if not out_guard.passed:
+            full_answer = out_guard.reason
+
+        background_tasks.add_task(
+            _save_assistant_message,
+            conversation_id=str(conv.id),
+            content=full_answer,
+            sources=final_sources,
+            latency_ms=latency,
+            user_query=payload.message,
+        )
+
+    return StreamingResponse(_stream_and_save(), media_type="text/event-stream")
+
+
+async def _save_assistant_message(
+    conversation_id: str,
+    content: str,
+    sources: list[str],
+    latency_ms: float,
+    user_query: str,
+) -> None:
+    """
+    Background task: persist the assistant reply to the DB after streaming ends.
+    Opens its own session so it runs safely outside the original request scope.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            msg = Message(
+                id=uuid.uuid4(),
+                conversation_id=uuid.UUID(conversation_id),
+                role="assistant",
+                content=content,
+                extra_data={"sources": [{"name": s} for s in sources], "latency_ms": latency_ms},
             )
+            session.add(msg)
+            await session.commit()
 
-    return StreamingResponse(
-        _stream_and_save(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Disable Nginx buffering for SSE
-        },
-    )
+            log_evaluation(
+                query=user_query,
+                response=content,
+                sources=sources,
+                latency_ms=latency_ms,
+                thread_id=conversation_id,
+            )
+        except Exception as exc:
+            logger.warning("chat.save_failed", error=str(exc))
+            await session.rollback()
 
 
 @router.post("/hitl-decision")
@@ -261,42 +232,32 @@ async def hitl_decision(
     Resume a paused HITL conversation after human approval/rejection.
     Called by the frontend's Approve/Reject buttons.
     """
-    graph = await get_graph()
-    config = {"configurable": {"thread_id": payload.thread_id}}
-
-    # Inject the human's decision into the state and resume
-    await graph.aupdate_state(
-        config,
-        {"hitl_approved": payload.approved},
-        as_node="hitl_node",
-    )
-
-    # Run the graph until it finishes (it will be quick since it's just tool/reviewer)
-    async for event in graph.astream_events(None, config=config, version="v2"):
-        pass
-
-    # Get the final state
-    final_state = await graph.aget_state(config)
-    final_answer = final_state.values.get("final_answer", "")
-    sources = final_state.values.get("sources", [])
-
-    from app.guardrails.guardrails import check_output_guardrails
-    out_guard = check_output_guardrails(final_answer)
-    
-    if not out_guard.passed:
-        final_answer = "⚠️ " + out_guard.reason
-        sources = []
-        
-    # Get conversation to save the message
     result = await db.execute(
         select(Conversation).where(
-            Conversation.thread_id == payload.thread_id,
+            Conversation.id == payload.conversation_id,
             Conversation.user_id == current_user.id,
         )
     )
     conv = result.scalar_one_or_none()
-    
-    if conv:
-        await _save_assistant_message(conv.id, final_answer, sources)
-    
-    return {"content": final_answer, "sources": sources}
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    graph  = get_graph()
+    config = {"configurable": {"thread_id": conv.thread_id}}
+
+    if payload.approved:
+        await graph.aupdate_state(
+            config,
+            {"hitl_approved": True, "hitl_required": False},
+        )
+        # Resume graph execution
+        async for _ in graph.astream(None, config=config):
+            pass
+        return {"status": "approved", "message": "Action approved and executed."}
+    else:
+        await graph.aupdate_state(
+            config,
+            {"hitl_approved": False, "hitl_required": False,
+             "final_answer": "Action cancelled based on your decision."},
+        )
+        return {"status": "rejected", "message": "Action cancelled."}
