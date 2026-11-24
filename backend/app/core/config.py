@@ -43,34 +43,35 @@ class Settings(BaseSettings):
     # ── LLM API Keys (used by LiteLLM gateway) ───────────────────────────────
     groq_api_key: str = ""
     google_api_key: str = ""
+    gemini_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     deepseek_api_key: str = ""
 
     # ── Per-Role Model Selection (swap any model without touching agent code) ─
     # 1. Supervisor  — pure routing classification, ultra-low latency
-    supervisor_model: str = "groq/llama-3.3-70b-versatile"
+    supervisor_model: str = "gemini/gemini-3.8-flash"
 
     # 2. Text-to-SQL — high code accuracy, strict SQL schema adherence
-    sql_model: str = "groq/llama-3.3-70b-versatile"
+    sql_model: str = "gemini/gemini-3.8-flash"
 
     # 3. RAG Generator — large context window, natural writing style
-    rag_model: str = "gemini/gemini-1.5-flash"
+    rag_model: str = "gemini/gemini-3.8-flash"
 
     # 4. Reviewer / Judge — deep logical reasoning, skeptical quality gate
-    reviewer_model: str = "groq/llama-3.3-70b-versatile"
+    reviewer_model: str = "gemini/gemini-3.8-flash"
 
     # 5. Memory Extractor — simple JSON extraction, background async task
-    memory_model: str = "groq/llama-3.1-8b-instant"
+    memory_model: str = "gemini/gemini-3.8-flash"
 
     # 6. Chat Agent — casual conversation, general music chit-chat
-    chat_model: str = "groq/llama-3.3-70b-versatile"
+    chat_model: str = "gemini/gemini-3.8-flash"
 
     # 7. Creative Agent — songwriting, lyrics, music poetry
-    creative_model: str = "groq/llama-3.3-70b-versatile"
+    creative_model: str = "gemini/gemini-3.8-flash"
 
     # 8. Tool Agent — live API calls, function calling
-    tool_model: str = "groq/llama-3.3-70b-versatile"
+    tool_model: str = "gemini/gemini-3.8-flash"
 
     # ── Legacy Gemini fields (kept for backward compat) ───────────────────────
     gemini_model: str = "gemini-1.5-flash"

@@ -3,13 +3,15 @@ ChromaDB Vector Store Service.
 Handles document ingestion and semantic similarity search.
 """
 
+import os
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 import uuid
 import structlog
 from pathlib import Path
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 from chromadb import PersistentClient
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from app.core.config import settings
 

@@ -35,6 +35,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+
+# Use SelectorEventLoop on Windows to avoid Proactor "Event loop is closed" errors
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # ── LangSmith ─────────────────────────────────────────────────────────────────
 from langsmith import Client
@@ -305,13 +310,26 @@ async def _rag_async(question: str) -> str:
     return response.choices[0].message.content
 
 
+def _safe_run_async(coro):
+    """Safely run an async coroutine across threads without Windows Proactor loop closure errors."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_closed():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
+
+
 def rag_pipeline(inputs: dict) -> dict:
     """
     Sync wrapper — LangSmith `evaluate()` calls this per example.
     Returns {"answer": "..."} so evaluators can compare with ground truth.
     """
     question = inputs["question"]
-    answer   = asyncio.run(_rag_async(question))
+    answer   = _safe_run_async(_rag_async(question))
     return {"answer": answer}
 
 
@@ -365,7 +383,7 @@ def correctness_evaluator(run: Run, example: Example) -> EvaluationResult:
         "Factual correctness: Does the system answer contain the same key facts "
         "and music theory concepts as the reference answer?"
     )
-    score = asyncio.run(_llm_judge(criterion, question, answer, reference))
+    score = _safe_run_async(_llm_judge(criterion, question, answer, reference))
     return EvaluationResult(key="correctness", score=score)
 
 
@@ -381,7 +399,7 @@ def relevance_evaluator(run: Run, example: Example) -> EvaluationResult:
         "Relevance: Does the answer directly address the question? "
         "Penalise answers that go off-topic or answer a different question."
     )
-    score = asyncio.run(_llm_judge(criterion, question, answer))
+    score = _safe_run_async(_llm_judge(criterion, question, answer))
     return EvaluationResult(key="relevance", score=score)
 
 
@@ -398,7 +416,7 @@ def faithfulness_evaluator(run: Run, example: Example) -> EvaluationResult:
         "artist names, dates, or chord labels not supported by standard music theory? "
         "Penalise any factually invented content."
     )
-    score = asyncio.run(_llm_judge(criterion, question, answer))
+    score = _safe_run_async(_llm_judge(criterion, question, answer))
     return EvaluationResult(key="faithfulness", score=score)
 
 
